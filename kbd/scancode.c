@@ -185,16 +185,13 @@ char ExtendedKeyMap[84] = {
 
 VOID ConvertScanCodeToKeyCode(PDEVICE_EXTENSION pDevExt, KEY_DATA* kData, char* keys)
 {
-
     char key = 0;
     PIRP irp;
     KEVENT event = { 0 };
     KEYBOARD_INDICATOR_PARAMETERS indParams = { 0 };
     IO_STATUS_BLOCK ioStatus = { 0 };
     NTSTATUS status = { 0 };
-    key = KeyMap[kData->KeyData];
-
-
+    *keys = KeyMap[kData->KeyData];
 
     KeInitializeEvent(&event, NotificationEvent, FALSE);
 
@@ -204,8 +201,7 @@ VOID ConvertScanCodeToKeyCode(PDEVICE_EXTENSION pDevExt, KEY_DATA* kData, char* 
 
     if (status == STATUS_PENDING)
     {
-        (VOID)KeWaitForSingleObject(&event, Suspended, KernelMode,
-            FALSE, NULL);
+        (VOID)KeWaitForSingleObject(&event, Suspended, KernelMode, FALSE, NULL);
     }
 
     status = irp->IoStatus.Status;
@@ -216,7 +212,7 @@ VOID ConvertScanCodeToKeyCode(PDEVICE_EXTENSION pDevExt, KEY_DATA* kData, char* 
         if (irp)
         {
             flag = (indParams.LedFlags & KEYBOARD_CAPS_LOCK_ON);
-            //DbgPrint("Caps Lock Indicator Status: %x.\n",flag);   
+            DbgPrint("Caps Lock Indicator Status: %x.\n",flag);   
         }
         else
         {
