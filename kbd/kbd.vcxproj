@@ -139,11 +139,9 @@
     <FilesToPackage Include="$(TargetPath)" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="scancode.c" />
     <ClCompile Include="source.c" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="scancode.h" />
     <ClInclude Include="source.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

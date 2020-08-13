@@ -27,15 +27,9 @@
     <ClInclude Include="source.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="scancode.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="source.c">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="scancode.c">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

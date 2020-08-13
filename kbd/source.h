@@ -20,7 +20,7 @@
 	typedef struct
 	{
 		LIST_ENTRY ListEntry;
-		char KeyData;
+		USHORT KeyData;
 		char KeyFlags;
 	}KEY_DATA;
 
